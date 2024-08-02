@@ -1,8 +1,9 @@
-import torch
-import torch.nn as nn
 import math
 import numpy as np
-from SOFT.kernel.subtraction import subtraction_gaussian_kernel
+
+import torch
+import torch.nn as nn
+
 from SOFT.kernel.inverse import newton_inverse_kernel
 
 class Approx_GeLU(nn.Module):
@@ -17,7 +18,6 @@ class Approx_GeLU(nn.Module):
         x = self.func(x)
         return x
 
-
 def subtraction_gaussian_kernel_torch(q, k):
     # [B, H, H1*W1, C] @ [C, H2*W2] -> [B, H, H1*W1, H2*W2]
     matA_square = q ** 2. @ torch.ones(k.shape[-2:]).cuda()
@@ -25,9 +25,8 @@ def subtraction_gaussian_kernel_torch(q, k):
     matB_square = torch.ones(q.shape[-2:]).cuda() @ k ** 2.
     return matA_square + matB_square - 2. * (q @ k)
 
-
 class SoftmaxFreeAttentionKernel(nn.Module):
-    def __init__(self, dim, num_heads, ratio, use_conv, max_iter=20, kernel_method="cuda"):
+    def __init__(self, dim, num_heads, ratio, use_conv, max_iter=20):
         super().__init__()
 
         self.head_dim = int(dim // num_heads)
@@ -35,12 +34,7 @@ class SoftmaxFreeAttentionKernel(nn.Module):
         self.ratio = ratio
         self.max_iter = max_iter
 
-        if kernel_method == "torch":
-            self.kernel_function = subtraction_gaussian_kernel_torch
-        elif kernel_method == "cuda":
-            self.kernel_function = subtraction_gaussian_kernel
-        else:
-            assert False, "please choose kernel method from torch and cuda"
+        self.kernel_function = subtraction_gaussian_kernel_torch
 
         if ratio == 1:
             self.Qlandmark_op = nn.Linear(self.head_dim, self.head_dim, bias=False)
@@ -57,7 +51,7 @@ class SoftmaxFreeAttentionKernel(nn.Module):
                 bias=False,
                 groups=self.num_head)
 
-    def forward(self, Q, V, H, W):
+    def forward(self, Q, V, H, W, return_attention=False):
         b, nhead, num_sequence, headdim = Q.size()
         # Q: [b, num_head, N, head_dim]
         Q = Q / math.sqrt(math.sqrt(headdim))
@@ -95,9 +89,16 @@ class SoftmaxFreeAttentionKernel(nn.Module):
             kernel_2_ = torch.exp(-kernel_2_/2)
 
             kernel_3_ = kernel_1_.transpose(-1, -2)
-
+            
+            if return_attention:
+                return {
+                    'attn': torch.matmul(torch.matmul(kernel_1_, newton_inverse_kernel(kernel_2_, self.max_iter)), kernel_3_),
+                    'kernel_1': kernel_1_,
+                    'kernel_2': kernel_2_
+                    }
+            
             X = torch.matmul(torch.matmul(kernel_1_, newton_inverse_kernel(kernel_2_, self.max_iter)), torch.matmul(kernel_3_, V))
-
+            
             if self.use_conv:
                 V = V.reshape(b, nhead, H, W, headdim)
                 V = V.permute(0, 4, 1, 2, 3).reshape(b*headdim, nhead, H, W)
@@ -107,7 +108,7 @@ class SoftmaxFreeAttentionKernel(nn.Module):
 
 
 class SoftmaxFreeAttention(nn.Module):
-    def __init__(self, dim, num_heads, ratio, conv_size, max_iter=20, kernel_method="cuda"):
+    def __init__(self, dim, num_heads, ratio, conv_size, max_iter=20):
         super().__init__()
 
         self.grad_checkpointing = True
@@ -118,7 +119,7 @@ class SoftmaxFreeAttention(nn.Module):
         self.W_q = nn.Linear(self.dim, self.num_head * self.head_dim)
         self.W_v = nn.Linear(self.dim, self.num_head * self.head_dim)
 
-        self.attn = SoftmaxFreeAttentionKernel(dim, num_heads, ratio, conv_size, max_iter, kernel_method)
+        self.attn = SoftmaxFreeAttentionKernel(dim, num_heads, ratio, conv_size, max_iter)
 
         self.ff = nn.Linear(self.num_head * self.head_dim, self.dim)
 
@@ -142,14 +143,13 @@ class SoftmaxFreeAttention(nn.Module):
         X = X.transpose(1, 2)
         return X
 
-
 class SoftmaxFreeTransformer(nn.Module):
-    def __init__(self, dim, num_heads, ratio, conv_size, drop_path=0., max_iter=20, kernel_method="torch"):
+    def __init__(self, dim, num_heads, ratio, conv_size, drop_path=0., max_iter=20):
         super().__init__()
         self.dim = dim
         self.hidden_dim = int(4*dim)
 
-        self.mha = SoftmaxFreeAttention(dim, num_heads, ratio, conv_size, max_iter, kernel_method)
+        self.mha = SoftmaxFreeAttention(dim, num_heads, ratio, conv_size, max_iter)
 
         self.dropout1 = torch.nn.Dropout(p=drop_path)
         self.norm1 = nn.LayerNorm(self.dim)
@@ -166,76 +166,17 @@ class SoftmaxFreeTransformer(nn.Module):
         mha_out = self.norm1(X + self.dropout1(mha_out))
         ff_out = self.ff2(self.act(self.ff1(mha_out)))
         mha_out = self.norm2(mha_out + self.dropout2(ff_out))
+
         return mha_out
 
-
 class SoftmaxFreeTransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, ratio, drop_path=0., conv_size=3, max_iter=20, kernel_method="cuda"):
+    def __init__(self, dim, num_heads, ratio, drop_path=0., conv_size=3, max_iter=20):
         super().__init__()
-        self.att = SoftmaxFreeTransformer(dim, num_heads, ratio, conv_size, drop_path, max_iter, kernel_method)
+        self.att = SoftmaxFreeTransformer(dim, num_heads, ratio, conv_size, drop_path, max_iter)
 
     def forward(self, x, H, W):
         x = self.att(x, H, W)
         return x
-
-
-class SoftmaxFreeNormAttentionKernel(SoftmaxFreeAttentionKernel):
-    def __init__(self, dim, num_heads, ratio, use_conv, max_iter=20, kernel_method="cuda"):
-        super(SoftmaxFreeSymNormAttentionKernel, self).__init__(dim, num_heads, ratio, use_conv, max_iter, kernel_method)
-
-    def forward(self, Q, V, H, W):
-        b, nhead, num_sequence, headdim = Q.size()
-        # Q: [b, num_head, N, head_dim]
-        Q = Q / math.sqrt(math.sqrt(headdim))
-        K=Q
-        if self.ratio == 1:
-            Q_landmarks = Q.reshape(b * nhead, H * W + 1, headdim)
-            Q_landmarks = self.Qlandmark_op(Q_landmarks)
-            Q_landmarks = self.Qnorm_act(Q_landmarks).reshape(b, nhead, self.num_landmarks + 1, headdim)
-            K_landmarks = Q_landmarks
-            attn = self.kernel_function(Q_landmarks, K_landmarks.transpose(-1, -2).contiguous())
-            attn = torch.exp(-attn / 2)
-            X = torch.matmul(attn, V)
-
-            if self.use_conv:
-                V_ = V[:, :, 1:, :]
-                cls_token = V[:, :, 0, :].unsqueeze(2)
-                V_ = V_.reshape(b, nhead, H, W, headdim)
-                V_ = V_.permute(0, 4, 1, 2, 3).reshape(b * headdim, nhead, H, W)
-                out = self.conv(V_).reshape(b, headdim, nhead, H, W).flatten(3).permute(0, 2, 3, 1)
-                out = torch.cat([cls_token, out], dim=2)
-                X += out
-        else:
-            Q_landmarks = Q.reshape(b * nhead, H * W, 
-                                    headdim).reshape(b * nhead, 
-                                                           H, W, headdim).permute(0, 3, 1, 2)
-            Q_landmarks = self.Qlandmark_op(Q_landmarks)
-            Q_landmarks = Q_landmarks.flatten(2).transpose(1, 2).reshape(b, nhead, -1, headdim)
-            Q_landmarks = self.Qnorm_act(Q_landmarks)
-            K_landmarks = Q_landmarks
-
-            kernel_1_ = self.kernel_function(Q, K_landmarks.transpose(-1, -2).contiguous())
-            kernel_1_ = torch.exp(-kernel_1_/2)
-
-            kernel_2_ = self.kernel_function(Q_landmarks, K_landmarks.transpose(-1, -2).contiguous())
-            kernel_2_ = torch.exp(-kernel_2_/2)
-            
-            D_sym = kernel_2_.sum(-1, keepdim=True)
-            D_sym = 1 / D_sym.sqrt()
-
-            kernel_2_inv = self.newton_inv(kernel_2_)
-            kernel_2_inv = D_sym * kernel_2_inv * D_sym.transpose(-1,-2)
-
-            kernel_3_ = kernel_1_.transpose(-1, -2)
-
-            X = torch.matmul(torch.matmul(kernel_1_, kernel_2_inv), torch.matmul(kernel_3_, V))
-
-            if self.use_conv:
-                V = V.reshape(b, nhead, H, W, headdim)
-                V = V.permute(0, 4, 1, 2, 3).reshape(b*headdim, nhead, H, W)
-                X += self.conv(V).reshape(b, headdim, nhead, H, W).flatten(3).permute(0, 2, 3, 1)
-
-        return X
 
     def newton_inv(self, mat):
         P = mat
@@ -254,21 +195,3 @@ class SoftmaxFreeNormAttentionKernel(SoftmaxFreeAttentionKernel):
         for i in range(self.max_iter):
             V = 2 * V - V @ P @ V
         return V
-
-
-class SoftmaxFreeNormAttention(SoftmaxFreeAttention):
-    def __init__(self, dim, num_heads, ratio, conv_size, max_iter=20, kernel_method="cuda"):
-        super(SoftmaxFreeNormAttention, self).__init__(dim, num_heads, ratio, conv_size, max_iter, kernel_method)
-        self.attn = SoftmaxFreeNormAttentionKernel(dim, num_heads, ratio, conv_size, max_iter, kernel_method)
-
-
-class SoftmaxFreeNormTransformer(SoftmaxFreeTransformer):
-    def __init__(self, dim, num_heads, ratio, conv_size, drop_path=0., max_iter=20, kernel_method="torch"):
-        super(SoftmaxFreeNormTransformer, self).__init__(dim, num_heads, ratio, conv_size, drop_path, max_iter, kernel_method)
-        self.mha = SoftmaxFreeNormAttention(dim, num_heads, ratio, conv_size, max_iter, kernel_method)
-
-
-class SoftmaxFreeNormTransformerBlock(SoftmaxFreeTransformerBlock):
-    def __init__(self, dim, num_heads, ratio, drop_path=0., conv_size=3, max_iter=20, kernel_method="cuda"):
-        super(SoftmaxFreeNormTransformerBlock, self).__init__(dim, num_heads, ratio, drop_path, conv_size, max_iter, kernel_method)
-        self.att = SoftmaxFreeNormTransformer(dim, num_heads, ratio, conv_size, drop_path, max_iter, kernel_method)

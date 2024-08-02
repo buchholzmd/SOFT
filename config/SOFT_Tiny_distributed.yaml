@@ -9,13 +9,22 @@ std: null
 crop_pct: null
 interpolation: ''
 
-no_aug: False
+no_aug: True
 scale: [0.08, 1.0]
 ratio: [0.75, 1.33]
 
 hflip: 0.5
 vflip: 0.
 color_jitter: 0.4
+
+aa: 'rand_m9_mstd0.5_inc1'
+aug_splits: 0
+jsd: False
+
+reprob: False
+remode: 'pixel'
+recount: 1
+resplit: False
 
 mixup: 0.8
 mixup_prob: 1.0
@@ -25,46 +34,26 @@ mixup_off_epoch: 0
 cutmix: 1
 cutmix_minmax: null
 
-aa: 'rand-m9-mstd0.5-inc1'
-
-reprob: False
-remode: 'pixel'
-recount: 1
-
 smoothing: 0.1
-# train_interpolation: 'random'
-train_interpolation: 'bilinear'
+train_interpolation: 'random'
 
 # ARCHITECTURE
-model: 'adkl' # 'soft_tiny'
-pretrained: True
-pretrained_weights: '/home/mdb9823/bayesian_attention/SOFT/SOFT_Tiny.pth.tar'
+model: 'soft_tiny'
+pretrained: False 
 initial_checkpoint: ''
 gp: null
 weight_decay: 0.05
 
-num_inducing_pts: 64
-
 # TRAINING
-num_epochs: 300
-start_epoch: null
-newton_maxiter: 20
-
 batch_size: 128
 validation_batch_size_multiplier: 1
-
-resume: False
-no_resume_opt: True
-prefetcher: True
 
 opt: 'adamw'
 opt_eps: 1.e-8
 opt_betas: null
 sched: cosine
 
-# lr: 1.e-3  # 1. : when not pre-trained
-lr: 10  # 1. : when not pre-trained
-gp_lr: 1.e-3
+lr: 1.e-3
 lr_noise: null
 lr_noise_pct: 0.67
 lr_noise_std: 1.0
@@ -84,33 +73,48 @@ adam_epoch: 1000
 
 clip_grad: 1.0
 
+epochs: 300
+start_epoch: null
+resume: False
+no_resume_opt: True
+newton_maxiter: 20
+
 drop: 0.0
-drop_path: 0.1 # akin to stochastic depth
+drop_path: 0.1
+drop_connect: null
+drop_block: null
+reset_drop: False
 
 sync_bn: False
 dist_bn: ''
+split_bn: False
 bn_tf: False
 bn_momentum: null
 bn_eps: null
 
-model_ema: False
+model_ema: True
 model_ema_force_cpu: False
-model_ema_decay: 0 # 0.99996
+model_ema_decay: 0.99996
 
-model_swa: False
+amp: False
+apex_amp: False
+native_amp: False
 
 # TESTING
 eval: False
+eval_checkpoint: '/home/mdb9823/bayesian_attention/SOFT/SOFT_Tiny.pth.tar'
+recovery_interval: 0
 eval_metric: 'top1'
-num_likelihood_samples: 16
 tta: 0
 
 # MISC
 seed: 42
 log_interval: 50
 workers: 8
-# num_gpu: 1
+num_gpu: 1
 save_images: False
-pin_mem: True
-output: '/home/mdb9823/bayesian_attention/output'
+pin_mem: False
+no_prefetcher: False
+output: ''
+local_rank: 0
 use_multi_epochs_loader: False
